@@ -1,0 +1,880 @@
+unit kern_sysctl;
+
+{$mode ObjFPC}{$H+}
+{$CALLING SysV_ABI_CDecl}
+
+interface
+
+
+const
+ CTL_MAXNAME=24; // largest number of components supported
+
+ CTLTYPE       =$f; // Mask for the type
+ CTLTYPE_NODE  =1;  // name is a node
+ CTLTYPE_INT   =2;  // name describes an integer
+ CTLTYPE_STRING=3;  // name describes a string
+ CTLTYPE_S64   =4;  // name describes a signed 64-bit number
+ CTLTYPE_OPAQUE=5;  // name describes a structure
+ CTLTYPE_STRUCT=CTLTYPE_OPAQUE; // name describes a structure
+ CTLTYPE_UINT  =6;  // name describes an unsigned integer
+ CTLTYPE_LONG  =7;  // name describes a long
+ CTLTYPE_ULONG =8;  // name describes an unsigned long
+ CTLTYPE_U64   =9;  // name describes an unsigned 64-bit number
+
+ CTLFLAG_RD     =$80000000; // Allow reads of variable
+ CTLFLAG_WR     =$40000000; // Allow writes to the variable
+ CTLFLAG_RW     =(CTLFLAG_RD or CTLFLAG_WR);
+ CTLFLAG_ANYBODY=$10000000; // All users can set this var
+ CTLFLAG_SECURE =$08000000; // Permit set only if securelevel<=0
+ CTLFLAG_PRISON =$04000000; // Prisoned roots can fiddle
+ CTLFLAG_DYN    =$02000000; // Dynamic oid - can be freed
+ CTLFLAG_SKIP   =$01000000; // Skip this sysctl when listing
+ CTLMASK_SECURE =$00F00000; // Secure level
+ CTLFLAG_TUN    =$00080000; // Tunable variable
+ CTLFLAG_RDTUN  =(CTLFLAG_RD or CTLFLAG_TUN);
+ CTLFLAG_RWTUN  =(CTLFLAG_RW or CTLFLAG_TUN);
+ CTLFLAG_MPSAFE =$00040000; // Handler is MP safe
+ CTLFLAG_VNET   =$00020000; // Prisons with vnet can fiddle
+ CTLFLAG_DYING  =$00010000; // oid is being removed
+ CTLFLAG_CAPRD  =$00008000; // Can be read in capability mode
+ CTLFLAG_CAPWR  =$00004000; // Can be written in capability mode
+ CTLFLAG_CAPRW  =(CTLFLAG_CAPRD or CTLFLAG_CAPWR);
+
+ OID_AUTO=(-1);
+
+ CTL_AUTO_START=$100;
+
+//Top-level identifiers
+ CTL_UNSPEC  = 0; // unused
+ CTL_KERN    = 1; // "high kernel": proc, limits
+ CTL_VM      = 2; // virtual memory
+ CTL_VFS     = 3; // filesystem, mount type is next
+ CTL_NET     = 4; // network, see socket.h
+ CTL_DEBUG   = 5; // debugging parameters
+ CTL_HW      = 6; // generic cpu/io
+ CTL_MACHDEP = 7; // machine dependent
+ CTL_USER    = 8; // user-level
+ CTL_P1003_1B= 9; // POSIX 1003.1B
+ CTL_MAXID   =10; // number of valid top-level ids
+
+
+//CTL_KERN identifiers
+ KERN_PROC      =14;
+ KERN_USRSTACK  =33;
+ KERN_ARND      =37;
+ KERN_SDKVERSION=38; //SDK version
+
+ KERN_SMP     =$100; //(OID_AUTO) Kernel SMP
+ KERN_SCHED   =$101; //(OID_AUTO) Scheduler
+
+//CTL_VM subtypes
+ KERN_VM_PS4DEV=1;   //vm parameters for PS4 (DevKit only)
+
+//KERN_PROC subtypes
+ KERN_PROC_APPINFO     =35; //Application information
+ KERN_PROC_SDK_VERSION =36; //SDK version of the executable file
+ KERN_PROC_IDTABLE     =37; //ID table information
+
+ KERN_PROC_SANITIZER   =41; //kern_sanitizer (Sanitizing mode)
+ KERN_PROC_PTC         =43; //Process time counter (value at program start)
+ KERN_PROC_TEXT_SEGMENT=44; //kern_dynlib_get_libkernel_text_segment
+
+//KERN_SMP subtypes
+ KERN_CPUS=$100; //(OID_AUTO) Number of CPUs online
+
+//KERN_SCHED subtypes
+ KERN_SCHED_CPUSETSIZE=$100; //(OID_AUTO) sizeof(cpuset_t)
+
+//CTL_HW identifiers
+ HW_MACHINE     = 1; // string: machine class
+ HW_MODEL       = 2; // string: specific machine model
+ HW_NCPU        = 3; // int: number of cpus
+ HW_BYTEORDER   = 4; // int: machine byte order
+ HW_PHYSMEM     = 5; // int: total memory
+ HW_USERMEM     = 6; // int: non-kernel memory
+ HW_PAGESIZE    = 7; // int: software page size
+ HW_DISKNAMES   = 8; // strings: disk drive names
+ HW_DISKSTATS   = 9; // struct: diskstats[]
+ HW_FLOATINGPT  =10; // int: has HW floating point?
+ HW_MACHINE_ARCH=11; // string: machine architecture
+ HW_REALMEM     =12; // int: 'real' memory
+ HW_MAXID       =13; // number of valid hw ids
+
+//MACHDEP subtypes
+ MACHDEP_TSC_FREQ=$100; //(OID_AUTO) Time Stamp Counter frequency
+
+//KERN_VM_PS4DEV subtypes
+ KERN_VM_PS4DEV_TRCMEM_TOTAL=$100; //(OID_AUTO) trace memory total
+ KERN_VM_PS4DEV_TRCMEM_AVAIL=$101; //(OID_AUTO) trace memory available
+
+//SYSCTL_HANDLER_ARGS oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req
+
+type
+ p_sysctl_req=^t_sysctl_req;
+
+ t_sysctl_func=function(req:p_sysctl_req;p:Pointer;s:QWORD):Integer;
+
+ t_sysctl_req=record
+  td      :Pointer; //p_kthread
+  lock    :Integer;
+  oldptr  :Pointer;
+  oldlen  :QWORD;
+  oldidx  :QWORD;
+  oldfunc :t_sysctl_func;
+  newptr  :Pointer;
+  newlen  :QWORD;
+  newidx  :QWORD;
+  newfunc :t_sysctl_func;
+  validlen:QWORD;
+  flags   :Integer;
+ end;
+
+ p_sysctl_oid=^t_sysctl_oid;
+
+ t_oid_handler=function(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+
+ t_sysctl_oid=record
+  oid_arg1   :Pointer;
+  oid_arg2   :Integer;
+  oid_kind   :DWORD;
+  oid_name   :PInteger;
+  oid_handler:t_oid_handler;
+ end;
+
+function sys___sysctl(name   :PInteger;
+                      namelen:DWORD;
+                      old    :Pointer;
+                      oldlenp:PQWORD;
+                      new    :Pointer;
+                      newlen :QWORD):Integer;
+
+procedure sysctl_register_all(); //SYSINIT(sysctl, SI_SUB_KMEM, SI_ORDER_ANY, sysctl_register_all, 0);
+
+implementation
+
+uses
+ errno,
+ systm,
+ vfile,
+ vmparam,
+ vm_map,
+ kern_thr,
+ kern_sx,
+ time,
+ kern_authinfo,
+ md_arc4random,
+ md_proc;
+
+var
+ sysctllock   :t_sx;
+ sysctlmemlock:t_sx;
+
+procedure sysctl_register_all();
+begin
+ sx_init(@sysctlmemlock, 'sysctl mem');
+ sx_init(@sysctllock   , 'sysctl lock');
+end;
+
+procedure SYSCTL_XLOCK(); inline;
+begin
+ sx_xlock(@sysctllock)
+end;
+
+procedure SYSCTL_XUNLOCK(); inline;
+begin
+ sx_xunlock(@sysctllock);
+end;
+
+procedure SYSCTL_ASSERT_XLOCKED(); inline;
+begin
+ sx_assert(@sysctllock)
+end;
+
+function SYSCTL_IN(req:p_sysctl_req;p:Pointer;s:QWORD):Integer; inline;
+begin
+ Result:=req^.newfunc(req,p,s);
+end;
+
+function SYSCTL_OUT(req:p_sysctl_req;p:Pointer;s:QWORD):Integer; inline;
+begin
+ Result:=req^.oldfunc(req,p,s);
+end;
+
+function SYSCTL_HANDLE(noid:p_sysctl_oid;
+                       name:PInteger;
+                       kind:DWORD;
+                       func:Pointer):Integer; inline;
+begin
+ noid^.oid_name   :=name+1;
+ noid^.oid_kind   :=kind;
+ noid^.oid_arg1   :=nil;
+ noid^.oid_arg2   :=0;
+ noid^.oid_handler:=t_oid_handler(func);
+ Result:=0
+end;
+
+function SYSCTL_HANDLE(noid:p_sysctl_oid;
+                       name:PInteger;
+                       kind:DWORD;
+                       arg1:Pointer;
+                       func:Pointer):Integer; inline;
+begin
+ noid^.oid_name   :=name+1;
+ noid^.oid_kind   :=kind;
+ noid^.oid_arg1   :=arg1;
+ noid^.oid_arg2   :=0;
+ noid^.oid_handler:=t_oid_handler(func);
+ Result:=0
+end;
+
+function SYSCTL_HANDLE(noid:p_sysctl_oid;
+                       name:PInteger;
+                       kind:DWORD;
+                       arg2:Integer;
+                       func:Pointer):Integer; inline;
+begin
+ noid^.oid_name   :=name+1;
+ noid^.oid_kind   :=kind;
+ noid^.oid_arg1   :=nil;
+ noid^.oid_arg2   :=arg2;
+ noid^.oid_handler:=t_oid_handler(func);
+ Result:=0
+end;
+
+function SYSCTL_HANDLE(noid:p_sysctl_oid;
+                       name:PInteger;
+                       kind:DWORD;
+                       arg1:Pointer;
+                       arg2:Integer;
+                       func:Pointer):Integer; inline;
+begin
+ noid^.oid_name   :=name+1;
+ noid^.oid_kind   :=kind;
+ noid^.oid_arg1   :=arg1;
+ noid^.oid_arg2   :=arg2;
+ noid^.oid_handler:=t_oid_handler(func);
+ Result:=0
+end;
+
+//Transfer function to/from user space.
+function sysctl_old_user(req:p_sysctl_req;p:Pointer;l:QWORD):Integer;
+var
+ i,len,origidx:QWORD;
+ error:Integer;
+begin
+ origidx:=req^.oldidx;
+ Inc(req^.oldidx,l);
+
+ if (req^.oldptr=nil) then
+ begin
+  Exit(0);
+ end;
+
+ i:=l;
+ len:=req^.validlen;
+ if (len <= origidx) then
+ begin
+  i:=0;
+ end else
+ begin
+  if (i > len - origidx) then
+  begin
+   i:=len - origidx;
+  end;
+  //if (req^.lock=REQ_WIRED) then
+  //begin
+  // error:=copyout_nofault(p, req^.oldptr + origidx, i);
+  //end else
+  begin
+   error:=copyout(p, req^.oldptr + origidx, i);
+  end;
+  if (error<>0) then
+  begin
+   Exit(error);
+  end;
+ end;
+ if (i < l) then
+ begin
+  Exit(ENOMEM);
+ end;
+ Exit(0);
+end;
+
+function sysctl_new_user(req:p_sysctl_req;p:Pointer;l:QWORD):Integer;
+var
+ error:Integer;
+begin
+ if (req^.newptr=nil) then
+ begin
+  Exit(0);
+ end;
+
+ if ((req^.newlen - req^.newidx) < l) then
+ begin
+  Exit(EINVAL);
+ end;
+
+ error:=copyin(req^.newptr + req^.newidx, p, l);
+
+ Inc(req^.newidx,l);
+ Exit(error);
+end;
+
+//Exit(ENOTDIR);
+//Exit(ENOENT);
+
+function sysctl_kern_proc_idtable(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+begin
+ //get idtable key count
+ Exit(ENOENT); //sceSblACMgrIsSystemUcred
+end;
+
+function sysctl_kern_usrstack(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+begin
+ Result:=SYSCTL_OUT(req,@g_vmspace.sv_usrstack,SizeOf(Pointer));
+end;
+
+function sysctl_kern_arandom(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ len:Integer;
+ data:array[0..254] of Byte;
+begin
+ len:=256;
+ if (req^.oldlen < 256)  then
+ begin
+  len:=req^.oldlen;
+ end;
+
+ arc4rand(@data,len,0);
+
+ Result:=SYSCTL_OUT(req,@data,len);
+end;
+
+function sysctl_kern_proc_appinfo(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ pid:Integer;
+ flags:Integer;
+ appinfo:t_appinfo;
+begin
+ if (req^.oldlen > 72) then Exit(EINVAL);
+
+ pid:=PInteger(arg1)^;
+
+ if (pid<>g_pid) then Exit(EINVAL);
+
+ //sceSblACMgrIsSystemUcred()!=0 -> any proc
+ //sceSblACMgrIsSystemUcred()==0 -> cur proc
+
+ Result:=SYSCTL_OUT(req,@g_appinfo,SizeOf(t_appinfo));
+
+ if (Result=0) and (req^.newlen=SizeOf(t_appinfo)) then
+ begin
+  Result:=SYSCTL_IN(req,@appinfo,SizeOf(t_appinfo));
+  if (Result=0) then
+  begin
+   flags:=g_appinfo.mmap_flags;
+   g_appinfo:=appinfo;
+   g_appinfo.mmap_flags:=g_appinfo.mmap_flags or (flags and 2)
+  end;
+ end;
+
+end;
+
+function sysctl_kern_proc_sanitizer(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ Sanitizer:Integer;
+begin
+ Sanitizer:=0;
+ Result:=SYSCTL_OUT(req,@Sanitizer,SizeOf(Integer));
+end;
+
+function sysctl_kern_proc_ptc(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+begin
+ Result:=SYSCTL_OUT(req,@p_proc.p_ptc,SizeOf(Int64));
+end;
+
+function sysctl_handle_int(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ tmpout:Integer;
+begin
+ if (arg1<>nil) then
+ begin
+  tmpout:=PInteger(arg1)^;
+ end else
+ begin
+  tmpout:=arg2;
+ end;
+
+ Result:=SYSCTL_OUT(req,@tmpout,SizeOf(Integer));
+
+ if (Result<>0) or (req^.newptr=nil) then Exit;
+
+ if (arg1=nil) then Exit(EPERM);
+
+ Result:=SYSCTL_IN(req, arg1, sizeof(Integer));
+end;
+
+function sysctl_handle_64(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ tmpout:QWORD;
+begin
+ if (arg1=nil) then
+ begin
+  Exit(EINVAL);
+ end;
+
+ tmpout:=PInteger(arg1)^;
+
+ Result:=SYSCTL_OUT(req,@tmpout,SizeOf(QWORD));
+
+ if (Result<>0) or (req^.newptr=nil) then Exit;
+
+ if (arg1=nil) then Exit(EPERM);
+
+ Result:=SYSCTL_IN(req, arg1, sizeof(QWORD));
+end;
+
+function name2oid(name:pchar;oid,len:PInteger):Integer;
+begin
+ Result:=0;
+
+ case RawByteString(name) of
+  'kern.smp.cpus':
+    begin
+     oid[0]:=CTL_KERN;
+     oid[1]:=KERN_SMP;
+     oid[2]:=KERN_CPUS;
+     len^  :=3;
+    end;
+  'kern.proc.ptc':
+    begin
+     oid[0]:=CTL_KERN;
+     oid[1]:=KERN_PROC;
+     oid[2]:=KERN_PROC_PTC;
+     len^  :=3;
+    end;
+  'kern.sched.cpusetsize':
+    begin
+     oid[0]:=CTL_KERN;
+     oid[1]:=KERN_SCHED;
+     oid[2]:=KERN_SCHED_CPUSETSIZE;
+     len^  :=3;
+    end;
+  'machdep.tsc_freq':
+    begin
+     oid[0]:=CTL_MACHDEP;
+     oid[1]:=MACHDEP_TSC_FREQ;
+     len^  :=2;
+    end;
+  'vm.ps4dev.trcmem_total':
+    begin
+     oid[0]:=CTL_VM;
+     oid[1]:=KERN_VM_PS4DEV;
+     oid[2]:=KERN_VM_PS4DEV_TRCMEM_TOTAL;
+     len^  :=3;
+    end;
+  'vm.ps4dev.trcmem_avail':
+    begin
+     oid[0]:=CTL_VM;
+     oid[1]:=KERN_VM_PS4DEV;
+     oid[2]:=KERN_VM_PS4DEV_TRCMEM_AVAIL;
+     len^  :=3;
+    end;
+  'kern.sdk_version':
+    begin
+     oid[0]:=CTL_KERN;
+     oid[1]:=KERN_SDKVERSION;
+     len^  :=2;
+    end;
+
+  else
+   Writeln(StdErr,'Unhandled name2oid:',name);
+   Assert(False);
+   Result:=ENOENT;
+ end;
+end;
+
+function sysctl_sysctl_name2oid(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ new:array[0..MAXPATHLEN] of AnsiChar;
+ oid:array[0..CTL_MAXNAME-1] of Integer;
+ len:Integer;
+begin
+ if (req^.newlen=0) then Exit(ENOENT);
+
+ if (req^.newlen >= MAXPATHLEN) then Exit(ENAMETOOLONG);
+
+ FillChar(new,SizeOf(new),0);
+
+ Result:=SYSCTL_IN(req, @new, req^.newlen);
+ if (Result<>0) then Exit;
+
+ Result:=name2oid(@new, @oid, @len);
+ if (Result<>0) then Exit;
+
+ Result:=SYSCTL_OUT(req, @oid, len*sizeof(Integer));
+end;
+
+function sysctl_kern_proc(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  KERN_PROC_APPINFO  :Result:=SYSCTL_HANDLE(noid,name,$C0040001,@sysctl_kern_proc_appinfo);
+  KERN_PROC_SANITIZER:Result:=SYSCTL_HANDLE(noid,name,$80040001,@sysctl_kern_proc_sanitizer);
+  KERN_PROC_PTC      :Result:=SYSCTL_HANDLE(noid,name,$90040009,@sysctl_kern_proc_ptc);
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_kern_proc:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_kern_smp(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+const
+ smp_cpus=8;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  KERN_CPUS:Result:=SYSCTL_HANDLE(noid,name,$80048002,smp_cpus,@sysctl_handle_int);
+
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_kern_smp:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_kern_sched(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  KERN_SCHED_CPUSETSIZE:Result:=SYSCTL_HANDLE(noid,name,$80040002,8,@sysctl_handle_int);
+
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_kern_sched:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_kern(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+const
+ system_sdk_version=$10010001;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  KERN_PROC      :Result:=sysctl_kern_proc(name+1,namelen-1,noid,req);
+
+  KERN_USRSTACK  :Result:=SYSCTL_HANDLE(noid,name,$80008008,@sysctl_kern_usrstack);
+  KERN_ARND      :Result:=SYSCTL_HANDLE(noid,name,$80048005,@sysctl_kern_arandom);
+  KERN_SDKVERSION:Result:=SYSCTL_HANDLE(noid,name,$80048006,system_sdk_version,@sysctl_handle_int);
+
+  KERN_SMP       :Result:=sysctl_kern_smp  (name+1,namelen-1,noid,req);
+  KERN_SCHED     :Result:=sysctl_kern_sched(name+1,namelen-1,noid,req);
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_kern:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_sysctl(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  3:Result:=SYSCTL_HANDLE(noid,name,$D004C002,@sysctl_sysctl_name2oid);
+
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_sysctl:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_hw(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  HW_PAGESIZE:Result:=SYSCTL_HANDLE(noid,name,$80048002,PAGE_SIZE,@sysctl_handle_int);
+
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_hw:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_machdep_tsc_freq(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ freq:QWORD;
+begin
+ freq:=System.InterlockedExchangeAdd64(tsc_freq,0);
+ if (freq=0) then Exit(EOPNOTSUPP);
+
+ Result:=sysctl_handle_64(oidp, @freq, 0, req);
+ if (Result=0) and (req^.newptr<>nil) then
+ begin
+  System.InterlockedExchange64(tsc_freq,freq);
+ end;
+end;
+
+function sysctl_machdep(name:PInteger;namelen:DWORD;noid:p_sysctl_oid;req:p_sysctl_req):Integer;
+begin
+ if (namelen=0) then Exit(ENOTDIR);
+ Result:=ENOENT;
+
+ case name[0] of
+  MACHDEP_TSC_FREQ:Result:=SYSCTL_HANDLE(noid,name,$C0000009,@sysctl_machdep_tsc_freq);
+
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_machdep:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_find_oid(name   :PInteger;
+                         namelen:DWORD;
+                         noid   :p_sysctl_oid;
+                         req    :p_sysctl_req):Integer;
+begin
+ if (namelen=0) then Exit(ENOENT);
+ Result:=ENOENT;
+
+ case name[0] of
+  CTL_UNSPEC :Result:=sysctl_sysctl (name+1,namelen-1,noid,req);
+  CTL_KERN   :Result:=sysctl_kern   (name+1,namelen-1,noid,req);
+  CTL_HW     :Result:=sysctl_hw     (name+1,namelen-1,noid,req);
+  CTL_MACHDEP:Result:=sysctl_machdep(name+1,namelen-1,noid,req);
+  else
+   begin
+    Writeln(StdErr,'Unhandled sysctl_root:',name[0]);
+    Assert(False);
+   end;
+ end;
+end;
+
+function sysctl_root(oidp:p_sysctl_oid;
+                     arg1:PInteger;
+                     arg2:DWORD;
+                     req :p_sysctl_req):Integer;
+var
+ oid:t_sysctl_oid;
+ indx:Integer;
+begin
+ oid:=Default(t_sysctl_oid);
+
+ Result:=sysctl_find_oid(arg1, arg2, @oid, req);
+ if (Result<>0) then Exit;
+
+ if (oid.oid_handler=nil) then Exit(EINVAL);
+ if (oid.oid_name   =nil) then Exit(EINVAL);
+
+ // Is this sysctl writable?
+ if (req^.newptr<>nil) and ((oid.oid_kind and CTLFLAG_WR)=0) then
+ begin
+  Exit(EPERM);
+ end;
+
+ // Is this sysctl writable by only privileged users?
+ if (req^.newptr<>nil) and ((oid.oid_kind and CTLFLAG_ANYBODY)=0) then
+ begin
+  //if (oid^.oid_kind and CTLFLAG_PRISON)
+  // priv:=PRIV_SYSCTL_WRITEJAIL;
+  //else
+  // priv:=PRIV_SYSCTL_WRITE;
+  //
+  //error:=priv_check(req^.td, priv);
+  //
+  //if (error<>0) then Ext(error);
+
+  Exit(EPERM);
+ end;
+
+ indx:=oid.oid_name-arg1;
+
+ if ((oid.oid_kind and CTLTYPE)=CTLTYPE_NODE) then
+ begin
+  arg1:=arg1 + indx;
+  arg2:=arg2 - indx;
+ end else
+ begin
+  arg1:=oid.oid_arg1;
+  arg2:=oid.oid_arg2;
+ end;
+
+ Result:=oid.oid_handler(@oid, arg1, arg2, req);
+
+end;
+
+function userland_sysctl(name    :PInteger;
+                         namelen :DWORD;
+                         old     :Pointer;
+                         oldlenp :PQWORD;
+                         inkernel:Integer;
+                         new     :Pointer;
+                         newlen  :QWORD;
+                         retval  :PQWORD;
+                         flags   :Integer):Integer;
+var
+ error,memlocked:Integer;
+ req:t_sysctl_req;
+begin
+ error:=0;
+
+ req:=Default(t_sysctl_req);
+
+ req.td   :=curkthread;
+ req.flags:=flags;
+
+ if (oldlenp<>nil) then
+ begin
+  if (inkernel<>0) then
+  begin
+   req.oldlen:=oldlenp^;
+  end else
+  begin
+   error:=copyin(oldlenp, @req.oldlen, sizeof(Pointer));
+   if (error<>0) then Exit(error);
+  end;
+ end;
+ req.validlen:=req.oldlen;
+
+ if (old<>nil) then
+ begin
+  //if (!useracc(old, req.oldlen, VM_PROT_WRITE))
+  // Exit(EFAULT);
+  req.oldptr:=old;
+ end;
+
+ if (new<>nil) then
+ begin
+  //if (!useracc(new, newlen, VM_PROT_READ))
+  // Exit(EFAULT);
+  req.newlen:=newlen;
+  req.newptr:=new;
+ end;
+
+ req.oldfunc:=@sysctl_old_user;
+ req.newfunc:=@sysctl_new_user;
+ //req.lock:=REQ_UNWIRED;
+
+ if (req.oldlen > PAGE_SIZE) then
+ begin
+  memlocked:=1;
+  sx_xlock(@sysctlmemlock);
+ end else
+ begin
+  memlocked:=0;
+ end;
+
+ repeat
+  req.oldidx:=0;
+  req.newidx:=0;
+  SYSCTL_XLOCK();
+  error:=sysctl_root(nil, name, namelen, @req);
+  SYSCTL_XUNLOCK();
+  if (error<>EAGAIN) then
+  begin
+   break;
+  end;
+  //kern_yield(PRI_USER);
+ until false;
+
+ //if (req.lock=REQ_WIRED) and (req.validlen > 0) then
+ //begin
+ // vsunlock(req.oldptr, req.validlen);
+ //end;
+
+ if (memlocked<>0) then
+ begin
+  sx_xunlock(@sysctlmemlock);
+ end;
+
+ if (error<>0) and (error<>ENOMEM) then
+ begin
+  Exit(error);
+ end;
+
+ if (retval<>nil) then
+ begin
+  if (req.oldptr<>nil) and (req.oldidx > req.validlen) then
+   retval^:=req.validlen
+  else
+   retval^:=req.oldidx;
+ end;
+ Exit(error);
+end;
+
+function sys___sysctl(name   :PInteger;
+                      namelen:DWORD;
+                      old    :Pointer;
+                      oldlenp:PQWORD;
+                      new    :Pointer;
+                      newlen :QWORD):Integer;
+var
+ error,i:Integer;
+ _name:array[0..CTL_MAXNAME-1] of Integer;
+ j:QWORD;
+begin
+ if (namelen > CTL_MAXNAME) or (namelen < 2) then
+ begin
+  Exit(EINVAL);
+ end;
+
+ error:=copyin(name, @_name, namelen * sizeof(Integer));
+ if (error<>0) then Exit(error);
+
+ error:=userland_sysctl(@_name,
+                        namelen,
+                        old,
+                        oldlenp,
+                        0,
+                        new,
+                        newlen,
+                        @j,
+                        0);
+
+ if (error<>0) and (error<>ENOMEM) then
+ begin
+  Exit(error);
+ end;
+
+ if (oldlenp<>nil) then
+ begin
+  i:=copyout(@j, oldlenp, sizeof(j));
+  if (i<>0) then
+  begin
+   Exit(i);
+  end;
+ end;
+
+ Exit(error);
+end;
+
+
+
+
+
+
+end.
+

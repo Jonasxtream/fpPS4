@@ -326,6 +326,7 @@ begin
  end;
 end;
 
+//sysctl to CTL_KERN(1).KERN_PROC(14).KERN_PROC_(44)
 function ps4_sceKernelGetLibkernelTextLocation(address:PPointer;size:PQWORD):Integer; SysV_ABI_CDecl;
 var
  elf:Telf_file;
@@ -484,6 +485,7 @@ begin
  //sys_dynlib_get_proc_param
  Result:=SCE_KERNEL_ERROR_EINVAL;
  if (sdkVersion=nil) then Exit;
+ //sys_dynlib_get_proc_param
  P:=GetSceProcParam;
 
  if (P<>nil) then
@@ -530,17 +532,32 @@ const
  LOAD_OPTIONS_ARG_STACK_SIZE                  =$0008;
  LOAD_OPTIONS_FULL_DEBUG_REQUIRED             =$0010;
 
+ //mmap_flags
+ //bit 2 -> first find addr is (1 shl 33) ->
+ //_sceKernelMapFlexibleMemory
+ //_sceKernelMapDirectMemory
+ //sceKernelMapDirectMemory2
+
+ //excp_flags
+ //bit 1 -> use in [libkernel_exception] ->
+ //      -> sceKernelInstallExceptionHandler
+ //      -> sceKernelRemoveExceptionHandler
+ //      -> sceKernelAddGpuExceptionEvent
+ //      -> sceKernelDeleteGpuExceptionEvent
+ //      -> sceKernelBacktraceSelf
+
 type
  PSCE_APP_ENV=^TSCE_APP_ENV;
  TSCE_APP_ENV=packed record
   AppId:Integer;                //4
-  unk1:Integer;                 //4
-  unk2:Integer;                 //4
+  mmap_flags:Integer;           //4
+  excp_flags:Integer;           //4
   AppType:Integer;              //4
-  TitleId:array[0.. 9] of char; //10
-  unk3:array[0..37] of Byte;    //38
-  flags:Byte;                   //1  eLoadOptions
-  unk4:array[0.. 6] of Byte;    //7
+  TitleId:array[0..9] of char;  //10
+  debug_level:Byte;             //1
+  slv_flags:Byte;               //1  eLoadOptions
+  unk1:Integer;                 //4
+  unk2:array[0..4] of QWORD;    //40
  end;
 
 //sysctl to CTL_KERN(1).KERN_PROC(14).KERN_PROC_APPINFO(35)
@@ -561,36 +578,54 @@ begin
 end;
 
 type
- p_get_authinfo=^t_get_authinfo;
- t_get_authinfo=record //0x88
+ p_authinfo=^t_authinfo;
+ t_authinfo=record //0x88
   {
-  //know values of utype
-  0x3800000000000006
-  0x380000000000000f
-  0x3800000000000010
+  //know values of app_type
+  0x3800000000000003   sceSblACMgrIsVdecProxyProcess
+  0x3800000000000006   sceSblACMgrIsCoredumpProcess
+  0x3800000000000007   sceSblACMgrIsSyscoreProcess
+  0x3800000000000009   sceSblACMgrHasUseHp3dPipeCapability
+  0x380000000000000f   sceSblACMgrIsShelluiProcess
+  0x3800000000000010   sceSblACMgrIsShellcoreProces
   0x3800000000000015
   0x3800000000000016
   0x3800000000000017
   0x3800000000000018
+  0x380000000000001e   sceSblACMgrIsFirstImageWriterProcess
+  0x380000000000001f   sceSblACMgrIsAvcontrolProcess
+  0x3800000000000022   sceSblACMgrIsMinisyscoreProcess
+  0x3800000000000021   sceSblACMgrIsSafemodeProcess
+  0x3800000000000026   sceSblACMgrIsSoftwagnerProcess
+  0x380000000000002d   sceSblACMgrIsSafemodeProcess
+  0x380000000000002e   sceSblACMgrIsMinisyscoreProcess
   0x3800000000000033
   0x3800000000000034
   0x3800000000000035
   0x3800000000000036
-  0x3800000000010003
-  0x3800000010000001
-  0x3800000010000002
+  0x3800000000010002   sceSblACMgrIsMountfusefsProcess
+  0x3800000000010003   sceSblACMgrIsDebuggerProcess
+  0x3800000000020001   sceSblACMgrIsGaikaiControllerDaemonProcess
+  0x3800000010000001   sceSblACMgrIsVideoplayerProcess
+  0x3800000010000002   sceSblACMgrIsVideoplayerProcess
   0x3800000010000003
   0x3800000010000004
-  0x3800000010000005
-  0x3800000010000009
+  0x3800000010000005   sceSblACMgrIsBdjavaProcess
+  0x3800000010000009   sceSblACMgrIsDiskplayeruiProcess
   0x380000001000000f
+  0x3800800000000002   sceSblACMgrIsVtrmadminProcess
+  0x380100000000002c   sceSblACMgrHasUseHp3dPipeCapability
+
+  0x38X1XXXXXXXXXXXX   sceSblACMgrIsDiagProcess
+  0x38X2XXXXXXXXXXXX   sceSblACMgrIsDiagProcess
   }
-  utype:qword;
-  flags:qword;  //62 bit IsSystemProcess
-  unknow:array[0..14] of qword
+  app_type :qword;
+  app_flags:qword;  //62 bit IsSystemProcess;61 bit IsGameProcess1;60 bit IsGameProcess2;
+  app_cap  :qword;
+  unknow:array[0..13] of qword
  end;
 
-function ps4_get_authinfo(pid:Integer;info:p_get_authinfo):Integer; SysV_ABI_CDecl;
+function ps4_get_authinfo(pid:Integer;info:p_authinfo):Integer; SysV_ABI_CDecl;
 begin
  //ignore pid
  Result:=0;
@@ -600,7 +635,9 @@ begin
   Exit(SCE_KERNEL_ERROR_EINVAL);
  end;
 
- info^:=Default(t_get_authinfo);
+ info^:=Default(t_authinfo);
+ info^.app_type :=$3800000000000000;
+ info^.app_flags:=$2000000000000000;
 
  _set_errno(0);
  Result:=0;
@@ -779,6 +816,7 @@ begin
 
  _sig_lock;
 
+ //sys_dynlib_dlsym
  Writeln('sceKernelDlsym:',symbol);
 
  node:=ps4_app.AcqureFileByHandle(handle);
